@@ -18,26 +18,50 @@ const User = require("./models/User");
 const Document = require("./models/document");
 const Invite = require("./models/Invite");
 const Comment = require("./models/Comment");
+const Version = require("./models/Version");
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URL =
+  process.env.FRONTEND_URL ||
+  "https://real-time-collab-frontend-qdo6.vercel.app";
 
 // ================= SERVER =================
 const server = http.createServer(app);
+
+// ================= CORS CONFIG =================
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://real-time-collab-frontend-qdo6.vercel.app"
+];
+
+// 🔥 Apply CORS (for REST APIs)
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true
+  })
+);
+
+// ================= SOCKET =================
 const io = new Server(server, {
-  cors: { origin: "*" }
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
 // ================= MIDDLEWARE =================
 app.use(express.json());
 app.use(helmet());
-app.use(cors({ origin: "*" }));
 
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-}));
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100
+  })
+);
 
 // ================= SANITIZE =================
 function sanitizeData(data) {
@@ -53,9 +77,10 @@ app.use((req, _res, next) => {
 });
 
 // ================= DATABASE =================
-mongoose.connect(process.env.MONGO_URI)
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB connected ✅"))
-  .catch(err => console.log("DB ERROR:", err));
+  .catch((err) => console.log("DB ERROR:", err));
 
 // ================= REDIS =================
 const redisClient = createClient({
@@ -66,7 +91,7 @@ const redisClient = createClient({
   password: process.env.REDIS_PASSWORD
 });
 
-redisClient.on("error", err => console.log("Redis Error ❌:", err));
+redisClient.on("error", (err) => console.log("Redis Error ❌:", err));
 
 const pubClient = redisClient.duplicate();
 const subClient = redisClient.duplicate();
@@ -77,14 +102,9 @@ const subClient = redisClient.duplicate();
   await subClient.connect();
   console.log("Redis Ready 🚀");
 
-  // ✅ SUBSCRIBE ONLY ONCE (CORRECT)
   await subClient.pSubscribe("doc:*", (message, channel) => {
     const documentId = channel.split(":")[1];
-
-    io.to(documentId).emit(
-      "receive-changes",
-      JSON.parse(message)
-    );
+    io.to(documentId).emit("receive-changes", JSON.parse(message));
   });
 })();
 
@@ -94,7 +114,7 @@ const authMiddleware = (req, res, next) => {
   if (!token) return res.status(401).json({ message: "Access denied" });
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
     req.user = decoded;
     next();
   } catch {
@@ -102,7 +122,7 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// ================= SOCKET =================
+// ================= SOCKET EVENTS =================
 const socketUsers = {};
 
 io.on("connection", (socket) => {
@@ -110,7 +130,6 @@ io.on("connection", (socket) => {
 
   socket.on("join-document", async ({ documentId, userId }) => {
     socket.join(documentId);
-
     socketUsers[socket.id] = { documentId, userId };
 
     await redisClient.sAdd(`doc:${documentId}`, userId);
@@ -120,10 +139,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send-changes", async ({ documentId, delta }) => {
-    await pubClient.publish(
-      `doc:${documentId}`,
-      JSON.stringify(delta)
-    );
+    await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
   });
 
   socket.on("typing", ({ documentId, userId }) => {
@@ -162,9 +178,7 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  // ✅ FIXED BUG
   const user = await User.findOne({ email });
-
   if (!user) return res.json({ message: "User not found" });
 
   const ok = await bcrypt.compare(password, user.password);
@@ -227,10 +241,7 @@ app.post("/documents/:id/invite", authMiddleware, async (req, res) => {
   res.json({ message: "Invite sent 📬" });
 });
 
-// ================= VERSION HISTORY =================
-const Version = require("./models/Version");
-
-// Get all versions (latest first)
+// ================= HISTORY =================
 app.get("/documents/:id/history", async (req, res) => {
   const versions = await Version.find({
     documentId: req.params.id
@@ -239,14 +250,12 @@ app.get("/documents/:id/history", async (req, res) => {
   res.json(versions);
 });
 
-// Restore a specific version
 app.post("/documents/:id/restore/:versionId", async (req, res) => {
   const version = await Version.findById(req.params.versionId);
   if (!version) {
     return res.status(404).json({ message: "Version not found" });
   }
 
-  // Update current document content
   await Document.findByIdAndUpdate(req.params.id, {
     content: version.content
   });
