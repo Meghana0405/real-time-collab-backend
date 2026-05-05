@@ -21,13 +21,9 @@ const Comment = require("./models/Comment");
 const Version = require("./models/Version");
 
 const app = express();
-const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
-const FRONTEND_URL =
-  process.env.FRONTEND_URL ||
-  "https://real-time-collab-frontend-qdo6.vercel.app";
-
-// ================= SERVER =================
 const server = http.createServer(app);
+
+const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
 
 // ================= CORS CONFIG =================
 const allowedOrigins = [
@@ -35,10 +31,21 @@ const allowedOrigins = [
   "https://real-time-collab-frontend-qdo6.vercel.app"
 ];
 
-// 🔥 Apply CORS (for REST APIs)
+// 🔥 Allow ALL Vercel deployments dynamically
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.includes(".vercel.app")
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("CORS blocked ❌"));
+    },
     credentials: true
   })
 );
@@ -46,7 +53,18 @@ app.use(
 // ================= SOCKET =================
 const io = new Server(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.includes(".vercel.app")
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("Socket CORS blocked ❌"));
+    },
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -122,44 +140,14 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// ================= SOCKET EVENTS =================
-const socketUsers = {};
+// ================= ROOT ROUTE =================
+app.get("/", (req, res) => {
+  res.send("Backend is running 🚀");
+});
 
-io.on("connection", (socket) => {
-  console.log("🟢 Socket connected:", socket.id);
-
-  socket.on("join-document", async ({ documentId, userId }) => {
-    socket.join(documentId);
-    socketUsers[socket.id] = { documentId, userId };
-
-    await redisClient.sAdd(`doc:${documentId}`, userId);
-    const users = await redisClient.sMembers(`doc:${documentId}`);
-
-    io.to(documentId).emit("active-users", users);
-  });
-
-  socket.on("send-changes", async ({ documentId, delta }) => {
-    await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
-  });
-
-  socket.on("typing", ({ documentId, userId }) => {
-    socket.to(documentId).emit("typing", userId);
-  });
-
-  socket.on("disconnect", async () => {
-    console.log("🔴 Socket disconnected:", socket.id);
-
-    const user = socketUsers[socket.id];
-    if (!user) return;
-
-    const { documentId, userId } = user;
-
-    await redisClient.sRem(`doc:${documentId}`, userId);
-    const users = await redisClient.sMembers(`doc:${documentId}`);
-
-    io.to(documentId).emit("active-users", users);
-    delete socketUsers[socket.id];
-  });
+// ================= HEALTH =================
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
 });
 
 // ================= AUTH ROUTES =================
@@ -185,7 +173,11 @@ app.post("/login", async (req, res) => {
   if (!ok) return res.json({ message: "Wrong password" });
 
   const token = jwt.sign({ userId: user._id }, JWT_SECRET);
-  res.json({ token, userId: user._id });
+
+  res.json({
+    token,
+    userId: user._id
+  });
 });
 
 // ================= DOCUMENT =================
@@ -216,59 +208,38 @@ app.get("/documents/:id", authMiddleware, async (req, res) => {
   res.json(doc);
 });
 
-// ================= INVITE =================
-app.post("/documents/:id/invite", authMiddleware, async (req, res) => {
-  const { email, role } = req.body;
+// ================= SOCKET EVENTS =================
+const socketUsers = {};
 
-  const token = crypto.randomBytes(20).toString("hex");
+io.on("connection", (socket) => {
+  console.log("🟢 Socket connected:", socket.id);
 
-  await Invite.create({
-    documentId: req.params.id,
-    email,
-    token,
-    role,
-    expiresAt: new Date(Date.now() + 86400000)
+  socket.on("join-document", async ({ documentId, userId }) => {
+    socket.join(documentId);
+    socketUsers[socket.id] = { documentId, userId };
+
+    await redisClient.sAdd(`doc:${documentId}`, userId);
+    const users = await redisClient.sMembers(`doc:${documentId}`);
+
+    io.to(documentId).emit("active-users", users);
   });
 
-  const link = `${FRONTEND_URL}/invite/${token}`;
-
-  await emailQueue.add("sendEmail", {
-    to: email,
-    subject: "Document Invite",
-    html: `<a href="${link}">Join Document</a>`
+  socket.on("send-changes", async ({ documentId, delta }) => {
+    await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
   });
 
-  res.json({ message: "Invite sent 📬" });
-});
+  socket.on("disconnect", async () => {
+    const user = socketUsers[socket.id];
+    if (!user) return;
 
-// ================= HISTORY =================
-app.get("/documents/:id/history", async (req, res) => {
-  const versions = await Version.find({
-    documentId: req.params.id
-  }).sort({ createdAt: -1 });
+    const { documentId, userId } = user;
 
-  res.json(versions);
-});
+    await redisClient.sRem(`doc:${documentId}`, userId);
+    const users = await redisClient.sMembers(`doc:${documentId}`);
 
-app.post("/documents/:id/restore/:versionId", async (req, res) => {
-  const version = await Version.findById(req.params.versionId);
-  if (!version) {
-    return res.status(404).json({ message: "Version not found" });
-  }
-
-  await Document.findByIdAndUpdate(req.params.id, {
-    content: version.content
+    io.to(documentId).emit("active-users", users);
+    delete socketUsers[socket.id];
   });
-
-  res.json({
-    message: "Version restored ✅",
-    content: version.content
-  });
-});
-
-// ================= HEALTH =================
-app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
 });
 
 // ================= START =================
