@@ -14,10 +14,6 @@ const sanitizeHtml = require("sanitize-html");
 
 const User = require("./models/User");
 const Document = require("./models/document");
-// (keep your other models if used)
-// const Invite = require("./models/Invite");
-// const Comment = require("./models/Comment");
-// const Version = require("./models/Version");
 
 const app = express();
 const server = http.createServer(app);
@@ -25,7 +21,6 @@ const server = http.createServer(app);
 const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
 
 // ================= CORS =================
-// allow local + all vercel deployments
 const allowedOrigins = [
   "http://localhost:5173",
   "https://real-time-collab-frontend-qdo6.vercel.app"
@@ -61,6 +56,7 @@ const io = new Server(server, {
 // ================= MIDDLEWARE =================
 app.use(express.json());
 app.use(helmet());
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -68,7 +64,7 @@ app.use(
   })
 );
 
-// simple sanitizer
+// ================= SANITIZE =================
 function sanitizeData(data) {
   if (typeof data === "string") {
     return sanitizeHtml(data, { allowedTags: [], allowedAttributes: {} });
@@ -92,7 +88,7 @@ mongoose
   .then(() => console.log("MongoDB connected ✅"))
   .catch((err) => console.log("DB ERROR:", err));
 
-// ================= REDIS (optional pub/sub) =================
+// ================= REDIS =================
 const redisClient = createClient({
   socket: {
     host: process.env.REDIS_HOST,
@@ -118,11 +114,11 @@ const subClient = redisClient.duplicate();
       io.to(documentId).emit("receive-changes", JSON.parse(message));
     });
   } catch (e) {
-    console.log("Redis init skipped/failed:", e.message);
+    console.log("Redis init skipped:", e.message);
   }
 })();
 
-// ================= AUTH MIDDLEWARE =================
+// ================= AUTH =================
 const authMiddleware = (req, res, next) => {
   const auth = req.headers.authorization;
   if (!auth) return res.status(401).json({ message: "Access denied" });
@@ -145,6 +141,17 @@ app.get("/", (_req, res) => {
 // ================= HEALTH =================
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// ================= METRICS =================
+app.get("/metrics", (_req, res) => {
+  res.json({
+    uptime: process.uptime(),
+    timestamp: Date.now(),
+    memory: process.memoryUsage(),
+    cpuUsage: process.cpuUsage(),
+    platform: process.platform
+  });
 });
 
 // ================= AUTH ROUTES =================
@@ -174,7 +181,7 @@ app.post("/login", async (req, res) => {
   res.json({ token, userId: user._id });
 });
 
-// ================= DOCUMENT ROUTES =================
+// ================= DOCUMENT =================
 
 // CREATE
 app.post("/documents", authMiddleware, async (req, res) => {
@@ -200,7 +207,7 @@ app.get("/documents", authMiddleware, async (req, res) => {
   res.json(docs);
 });
 
-// GET ONE (safer)
+// GET ONE
 app.get("/documents/:id", authMiddleware, async (req, res) => {
   try {
     const doc = await Document.findById(req.params.id);
@@ -211,12 +218,11 @@ app.get("/documents/:id", authMiddleware, async (req, res) => {
 
     res.json(doc);
   } catch (err) {
-    console.error("Fetch Error:", err);
     res.status(500).json({ message: "Server error ❌" });
   }
 });
 
-// UPDATE (🔥 THIS WAS MISSING)
+// UPDATE
 app.put("/documents/:id", authMiddleware, async (req, res) => {
   try {
     const { content, title } = req.body;
@@ -227,24 +233,22 @@ app.put("/documents/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ message: "Document not found ❌" });
     }
 
-    // optional ownership check
     if (doc.owner.toString() !== req.user.userId) {
       return res.status(403).json({ message: "Not allowed ❌" });
     }
 
-    if (typeof title !== "undefined") doc.title = title;
-    if (typeof content !== "undefined") doc.content = content;
+    if (title !== undefined) doc.title = title;
+    if (content !== undefined) doc.content = content;
 
     await doc.save();
 
     res.json({ message: "Document updated ✅", doc });
   } catch (err) {
-    console.error("Update Error:", err);
     res.status(500).json({ message: "Server error ❌" });
   }
 });
 
-// ================= SOCKET EVENTS =================
+// ================= SOCKET =================
 const socketUsers = {};
 
 io.on("connection", (socket) => {
@@ -265,7 +269,6 @@ io.on("connection", (socket) => {
     try {
       await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
     } catch {
-      // fallback if redis not ready
       socket.to(documentId).emit("receive-changes", delta);
     }
   });
