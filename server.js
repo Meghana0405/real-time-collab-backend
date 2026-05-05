@@ -1,3 +1,4 @@
+// ================= IMPORTS =================
 const express = require("express");
 require("dotenv").config();
 const mongoose = require("mongoose");
@@ -6,46 +7,44 @@ const jwt = require("jsonwebtoken");
 const cors = require("cors");
 const http = require("http");
 const { Server } = require("socket.io");
-const crypto = require("crypto");
 const { createClient } = require("redis");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const sanitizeHtml = require("sanitize-html");
 
-const emailQueue = require("./queue/emailQueue");
-
 const User = require("./models/User");
 const Document = require("./models/document");
-const Invite = require("./models/Invite");
-const Comment = require("./models/Comment");
-const Version = require("./models/Version");
+// (keep your other models if used)
+// const Invite = require("./models/Invite");
+// const Comment = require("./models/Comment");
+// const Version = require("./models/Version");
 
 const app = express();
 const server = http.createServer(app);
 
 const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
 
-// ================= CORS CONFIG =================
+// ================= CORS =================
+// allow local + all vercel deployments
 const allowedOrigins = [
   "http://localhost:5173",
   "https://real-time-collab-frontend-qdo6.vercel.app"
 ];
 
-// 🔥 Allow ALL Vercel deployments dynamically
+const allowOrigin = (origin, callback) => {
+  if (!origin) return callback(null, true);
+  if (
+    allowedOrigins.includes(origin) ||
+    origin.endsWith(".vercel.app")
+  ) {
+    return callback(null, true);
+  }
+  return callback(new Error("CORS blocked ❌"));
+};
+
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-
-      if (
-        allowedOrigins.includes(origin) ||
-        origin.includes(".vercel.app")
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(new Error("CORS blocked ❌"));
-    },
+    origin: allowOrigin,
     credentials: true
   })
 );
@@ -53,18 +52,7 @@ app.use(
 // ================= SOCKET =================
 const io = new Server(server, {
   cors: {
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-
-      if (
-        allowedOrigins.includes(origin) ||
-        origin.includes(".vercel.app")
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(new Error("Socket CORS blocked ❌"));
-    },
+    origin: allowOrigin,
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -73,7 +61,6 @@ const io = new Server(server, {
 // ================= MIDDLEWARE =================
 app.use(express.json());
 app.use(helmet());
-
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -81,10 +68,15 @@ app.use(
   })
 );
 
-// ================= SANITIZE =================
+// simple sanitizer
 function sanitizeData(data) {
   if (typeof data === "string") {
     return sanitizeHtml(data, { allowedTags: [], allowedAttributes: {} });
+  }
+  if (data && typeof data === "object") {
+    const out = Array.isArray(data) ? [] : {};
+    for (const k in data) out[k] = sanitizeData(data[k]);
+    return out;
   }
   return data;
 }
@@ -100,7 +92,7 @@ mongoose
   .then(() => console.log("MongoDB connected ✅"))
   .catch((err) => console.log("DB ERROR:", err));
 
-// ================= REDIS =================
+// ================= REDIS (optional pub/sub) =================
 const redisClient = createClient({
   socket: {
     host: process.env.REDIS_HOST,
@@ -115,24 +107,29 @@ const pubClient = redisClient.duplicate();
 const subClient = redisClient.duplicate();
 
 (async () => {
-  await redisClient.connect();
-  await pubClient.connect();
-  await subClient.connect();
-  console.log("Redis Ready 🚀");
+  try {
+    await redisClient.connect();
+    await pubClient.connect();
+    await subClient.connect();
+    console.log("Redis Ready 🚀");
 
-  await subClient.pSubscribe("doc:*", (message, channel) => {
-    const documentId = channel.split(":")[1];
-    io.to(documentId).emit("receive-changes", JSON.parse(message));
-  });
+    await subClient.pSubscribe("doc:*", (message, channel) => {
+      const documentId = channel.split(":")[1];
+      io.to(documentId).emit("receive-changes", JSON.parse(message));
+    });
+  } catch (e) {
+    console.log("Redis init skipped/failed:", e.message);
+  }
 })();
 
-// ================= AUTH =================
+// ================= AUTH MIDDLEWARE =================
 const authMiddleware = (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).json({ message: "Access denied" });
+  const auth = req.headers.authorization;
+  if (!auth) return res.status(401).json({ message: "Access denied" });
 
   try {
-    const decoded = jwt.verify(token.replace("Bearer ", ""), JWT_SECRET);
+    const token = auth.replace("Bearer ", "");
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
     next();
   } catch {
@@ -140,8 +137,8 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-// ================= ROOT ROUTE =================
-app.get("/", (req, res) => {
+// ================= ROOT =================
+app.get("/", (_req, res) => {
   res.send("Backend is running 🚀");
 });
 
@@ -174,13 +171,12 @@ app.post("/login", async (req, res) => {
 
   const token = jwt.sign({ userId: user._id }, JWT_SECRET);
 
-  res.json({
-    token,
-    userId: user._id
-  });
+  res.json({ token, userId: user._id });
 });
 
-// ================= DOCUMENT =================
+// ================= DOCUMENT ROUTES =================
+
+// CREATE
 app.post("/documents", authMiddleware, async (req, res) => {
   const doc = new Document({
     title: req.body.title || "Untitled",
@@ -192,6 +188,7 @@ app.post("/documents", authMiddleware, async (req, res) => {
   res.json(doc);
 });
 
+// LIST
 app.get("/documents", authMiddleware, async (req, res) => {
   const docs = await Document.find({
     $or: [
@@ -203,9 +200,48 @@ app.get("/documents", authMiddleware, async (req, res) => {
   res.json(docs);
 });
 
+// GET ONE (safer)
 app.get("/documents/:id", authMiddleware, async (req, res) => {
-  const doc = await Document.findById(req.params.id);
-  res.json(doc);
+  try {
+    const doc = await Document.findById(req.params.id);
+
+    if (!doc) {
+      return res.status(404).json({ message: "Document not found ❌" });
+    }
+
+    res.json(doc);
+  } catch (err) {
+    console.error("Fetch Error:", err);
+    res.status(500).json({ message: "Server error ❌" });
+  }
+});
+
+// UPDATE (🔥 THIS WAS MISSING)
+app.put("/documents/:id", authMiddleware, async (req, res) => {
+  try {
+    const { content, title } = req.body;
+
+    const doc = await Document.findById(req.params.id);
+
+    if (!doc) {
+      return res.status(404).json({ message: "Document not found ❌" });
+    }
+
+    // optional ownership check
+    if (doc.owner.toString() !== req.user.userId) {
+      return res.status(403).json({ message: "Not allowed ❌" });
+    }
+
+    if (typeof title !== "undefined") doc.title = title;
+    if (typeof content !== "undefined") doc.content = content;
+
+    await doc.save();
+
+    res.json({ message: "Document updated ✅", doc });
+  } catch (err) {
+    console.error("Update Error:", err);
+    res.status(500).json({ message: "Server error ❌" });
+  }
 });
 
 // ================= SOCKET EVENTS =================
@@ -218,14 +254,20 @@ io.on("connection", (socket) => {
     socket.join(documentId);
     socketUsers[socket.id] = { documentId, userId };
 
-    await redisClient.sAdd(`doc:${documentId}`, userId);
-    const users = await redisClient.sMembers(`doc:${documentId}`);
-
-    io.to(documentId).emit("active-users", users);
+    try {
+      await redisClient.sAdd(`doc:${documentId}`, userId);
+      const users = await redisClient.sMembers(`doc:${documentId}`);
+      io.to(documentId).emit("active-users", users);
+    } catch {}
   });
 
   socket.on("send-changes", async ({ documentId, delta }) => {
-    await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
+    try {
+      await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
+    } catch {
+      // fallback if redis not ready
+      socket.to(documentId).emit("receive-changes", delta);
+    }
   });
 
   socket.on("disconnect", async () => {
@@ -234,10 +276,12 @@ io.on("connection", (socket) => {
 
     const { documentId, userId } = user;
 
-    await redisClient.sRem(`doc:${documentId}`, userId);
-    const users = await redisClient.sMembers(`doc:${documentId}`);
+    try {
+      await redisClient.sRem(`doc:${documentId}`, userId);
+      const users = await redisClient.sMembers(`doc:${documentId}`);
+      io.to(documentId).emit("active-users", users);
+    } catch {}
 
-    io.to(documentId).emit("active-users", users);
     delete socketUsers[socket.id];
   });
 });
