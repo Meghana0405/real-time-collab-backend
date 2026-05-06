@@ -4,8 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "worker": "node queue/emailWorker.js",
-    "dev": "concurrently \"npm run start\" \"npm run worker\""
+    "dev": "node server.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
@@ -25,7 +24,6 @@
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "artillery": "^2.0.31",
-    "concurrently": "^9.2.1"
+    "artillery": "^2.0.31"
   }
 }

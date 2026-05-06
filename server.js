@@ -1,6 +1,7 @@
 // ================= IMPORTS =================
 const express = require("express");
 require("dotenv").config();
+
 const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -11,6 +12,7 @@ const { createClient } = require("redis");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const sanitizeHtml = require("sanitize-html");
+const nodemailer = require("nodemailer");
 
 const User = require("./models/User");
 const Document = require("./models/document");
@@ -18,23 +20,66 @@ const Document = require("./models/document");
 const app = express();
 const server = http.createServer(app);
 
-const JWT_SECRET = process.env.JWT_SECRET || "mysecretkey";
+const JWT_SECRET =
+  process.env.JWT_SECRET || "mysecretkey";
+
+// ================= EMAIL CONFIG =================
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 587,
+  secure: false,
+
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  },
+
+  tls: {
+    rejectUnauthorized: false
+  }
+});
+
+// ✅ Verify SMTP
+transporter.verify((error) => {
+
+  if (error) {
+
+    console.error(
+      "❌ SMTP ERROR:",
+      error.message
+    );
+
+  } else {
+
+    console.log(
+      "✅ SMTP SERVER READY"
+    );
+
+  }
+});
 
 // ================= CORS =================
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://real-time-collab-frontend-qdo6.vercel.app"
+  "https://real-time-collab-frontend-rho.vercel.app"
 ];
 
 const allowOrigin = (origin, callback) => {
-  if (!origin) return callback(null, true);
+
+  if (!origin) {
+    return callback(null, true);
+  }
+
   if (
     allowedOrigins.includes(origin) ||
     origin.endsWith(".vercel.app")
   ) {
     return callback(null, true);
   }
-  return callback(new Error("CORS blocked ❌"));
+
+  return callback(
+    new Error("CORS blocked ❌")
+  );
 };
 
 app.use(
@@ -55,6 +100,7 @@ const io = new Server(server, {
 
 // ================= MIDDLEWARE =================
 app.use(express.json());
+
 app.use(helmet());
 
 app.use(
@@ -66,27 +112,50 @@ app.use(
 
 // ================= SANITIZE =================
 function sanitizeData(data) {
+
   if (typeof data === "string") {
-    return sanitizeHtml(data, { allowedTags: [], allowedAttributes: {} });
+
+    return sanitizeHtml(data, {
+      allowedTags: [],
+      allowedAttributes: {}
+    });
+
   }
+
   if (data && typeof data === "object") {
-    const out = Array.isArray(data) ? [] : {};
-    for (const k in data) out[k] = sanitizeData(data[k]);
+
+    const out = Array.isArray(data)
+      ? []
+      : {};
+
+    for (const k in data) {
+      out[k] = sanitizeData(data[k]);
+    }
+
     return out;
   }
+
   return data;
 }
 
 app.use((req, _res, next) => {
-  if (req.body) req.body = sanitizeData(req.body);
+
+  if (req.body) {
+    req.body = sanitizeData(req.body);
+  }
+
   next();
 });
 
 // ================= DATABASE =================
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB connected ✅"))
-  .catch((err) => console.log("DB ERROR:", err));
+  .then(() =>
+    console.log("MongoDB connected ✅")
+  )
+  .catch((err) =>
+    console.log("DB ERROR:", err)
+  );
 
 // ================= REDIS =================
 const redisClient = createClient({
@@ -94,57 +163,109 @@ const redisClient = createClient({
     host: process.env.REDIS_HOST,
     port: Number(process.env.REDIS_PORT)
   },
+
   password: process.env.REDIS_PASSWORD
 });
-
-redisClient.on("error", (err) => console.log("Redis Error ❌:", err));
 
 const pubClient = redisClient.duplicate();
 const subClient = redisClient.duplicate();
 
 (async () => {
+
   try {
+
     await redisClient.connect();
     await pubClient.connect();
     await subClient.connect();
+
+    await subClient.pSubscribe(
+      "doc:*",
+      (message, channel) => {
+
+        const documentId =
+          channel.split(":")[1];
+
+        io.to(documentId).emit(
+          "receive-changes",
+          JSON.parse(message)
+        );
+      }
+    );
+
     console.log("Redis Ready 🚀");
 
-    await subClient.pSubscribe("doc:*", (message, channel) => {
-      const documentId = channel.split(":")[1];
-      io.to(documentId).emit("receive-changes", JSON.parse(message));
-    });
   } catch (e) {
-    console.log("Redis init skipped:", e.message);
+
+    console.log(
+      "Redis skipped:",
+      e.message
+    );
+
   }
 })();
 
 // ================= AUTH =================
-const authMiddleware = (req, res, next) => {
-  const auth = req.headers.authorization;
-  if (!auth) return res.status(401).json({ message: "Access denied" });
+const authMiddleware = (
+  req,
+  res,
+  next
+) => {
+
+  const auth =
+    req.headers.authorization;
+
+  if (!auth) {
+
+    return res.status(401).json({
+      message: "Access denied"
+    });
+
+  }
 
   try {
-    const token = auth.replace("Bearer ", "");
-    const decoded = jwt.verify(token, JWT_SECRET);
+
+    const token = auth.replace(
+      "Bearer ",
+      ""
+    );
+
+    const decoded = jwt.verify(
+      token,
+      JWT_SECRET
+    );
+
     req.user = decoded;
+
     next();
+
   } catch {
-    res.status(400).json({ message: "Invalid token" });
+
+    return res.status(400).json({
+      message: "Invalid token"
+    });
+
   }
 };
 
 // ================= ROOT =================
 app.get("/", (_req, res) => {
+
   res.send("Backend is running 🚀");
+
 });
 
 // ================= HEALTH =================
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+
+  res.json({
+    status: "ok"
+  });
+
 });
 
 // ================= METRICS =================
 app.get("/metrics", (_req, res) => {
+
   res.json({
     uptime: process.uptime(),
     timestamp: Date.now(),
@@ -152,146 +273,573 @@ app.get("/metrics", (_req, res) => {
     cpuUsage: process.cpuUsage(),
     platform: process.platform
   });
+
 });
 
-// ================= AUTH ROUTES =================
-app.post("/register", async (req, res) => {
-  const { email, password } = req.body;
+// ================= REGISTER =================
+app.post(
+  "/register",
+  async (req, res) => {
 
-  const exists = await User.findOne({ email });
-  if (exists) return res.json({ message: "User exists" });
+    try {
 
-  const hash = await bcrypt.hash(password, 10);
-  await new User({ email, password: hash }).save();
+      const {
+        email,
+        password
+      } = req.body;
 
-  res.json({ message: "Registered successfully" });
-});
+      const exists =
+        await User.findOne({
+          email
+        });
 
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+      if (exists) {
 
-  const user = await User.findOne({ email });
-  if (!user) return res.json({ message: "User not found" });
+        return res.json({
+          message: "User exists"
+        });
 
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) return res.json({ message: "Wrong password" });
+      }
 
-  const token = jwt.sign({ userId: user._id }, JWT_SECRET);
+      const hash =
+        await bcrypt.hash(
+          password,
+          10
+        );
 
-  res.json({ token, userId: user._id });
-});
+      await new User({
+        email,
+        password: hash
+      }).save();
 
-// ================= DOCUMENT =================
+      res.json({
+        message:
+          "Registered successfully"
+      });
 
-// CREATE
-app.post("/documents", authMiddleware, async (req, res) => {
-  const doc = new Document({
-    title: req.body.title || "Untitled",
-    content: {},
-    owner: req.user.userId
-  });
+    } catch (err) {
 
-  await doc.save();
-  res.json(doc);
-});
+      res.status(500).json({
+        message: "Register failed"
+      });
 
-// LIST
-app.get("/documents", authMiddleware, async (req, res) => {
-  const docs = await Document.find({
-    $or: [
-      { owner: req.user.userId },
-      { "collaborators.userId": req.user.userId }
-    ]
-  });
-
-  res.json(docs);
-});
-
-// GET ONE
-app.get("/documents/:id", authMiddleware, async (req, res) => {
-  try {
-    const doc = await Document.findById(req.params.id);
-
-    if (!doc) {
-      return res.status(404).json({ message: "Document not found ❌" });
     }
-
-    res.json(doc);
-  } catch (err) {
-    res.status(500).json({ message: "Server error ❌" });
   }
-});
+);
 
-// UPDATE
-app.put("/documents/:id", authMiddleware, async (req, res) => {
-  try {
-    const { content, title } = req.body;
+// ================= LOGIN =================
+app.post(
+  "/login",
+  async (req, res) => {
 
-    const doc = await Document.findById(req.params.id);
+    try {
 
-    if (!doc) {
-      return res.status(404).json({ message: "Document not found ❌" });
+      const {
+        email,
+        password
+      } = req.body;
+
+      const user =
+        await User.findOne({
+          email
+        });
+
+      if (!user) {
+
+        return res.json({
+          message:
+            "User not found"
+        });
+
+      }
+
+      const ok =
+        await bcrypt.compare(
+          password,
+          user.password
+        );
+
+      if (!ok) {
+
+        return res.json({
+          message:
+            "Wrong password"
+        });
+
+      }
+
+      const token = jwt.sign(
+        {
+          userId: user._id
+        },
+        JWT_SECRET
+      );
+
+      res.json({
+        token,
+        userId: user._id
+      });
+
+    } catch (err) {
+
+      res.status(500).json({
+        message: "Login failed"
+      });
+
     }
+  }
+);
 
-    if (doc.owner.toString() !== req.user.userId) {
-      return res.status(403).json({ message: "Not allowed ❌" });
-    }
+// ================= CREATE DOCUMENT =================
+app.post(
+  "/documents",
+  authMiddleware,
+  async (req, res) => {
 
-    if (title !== undefined) doc.title = title;
-    if (content !== undefined) doc.content = content;
+    const doc = new Document({
+      title:
+        req.body.title ||
+        "Untitled",
+
+      content: {},
+
+      owner:
+        req.user.userId,
+
+      collaborators: []
+    });
 
     await doc.save();
 
-    res.json({ message: "Document updated ✅", doc });
-  } catch (err) {
-    res.status(500).json({ message: "Server error ❌" });
+    res.json(doc);
   }
-});
+);
+
+// ================= GET ALL DOCUMENTS =================
+app.get(
+  "/documents",
+  authMiddleware,
+  async (req, res) => {
+
+    const docs =
+      await Document.find({
+        $or: [
+          {
+            owner:
+              req.user.userId
+          },
+          {
+            "collaborators.userId":
+              req.user.userId
+          }
+        ]
+      });
+
+    res.json(docs);
+  }
+);
+
+// ================= GET SINGLE DOCUMENT =================
+app.get(
+  "/documents/:id",
+  authMiddleware,
+  async (req, res) => {
+
+    const doc =
+      await Document.findById(
+        req.params.id
+      );
+
+    if (!doc) {
+
+      return res
+        .status(404)
+        .json({
+          message:
+            "Document not found ❌"
+        });
+
+    }
+
+    res.json(doc);
+  }
+);
+
+// ================= UPDATE DOCUMENT =================
+app.put(
+  "/documents/:id",
+  authMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const doc =
+        await Document.findById(
+          req.params.id
+        );
+
+      if (!doc) {
+
+        return res
+          .status(404)
+          .json({
+            message:
+              "Document not found ❌"
+          });
+
+      }
+
+      doc.content =
+        req.body.content;
+
+      await doc.save();
+
+      res.json({
+        success: true,
+        message:
+          "Document updated ✅"
+      });
+
+    } catch (err) {
+
+      console.error(
+        "UPDATE ERROR:",
+        err
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Update failed"
+      });
+
+    }
+  }
+);
+
+// ================= DELETE DOCUMENT =================
+app.delete(
+  "/documents/:id",
+  authMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const doc =
+        await Document.findById(
+          req.params.id
+        );
+
+      if (!doc) {
+
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message:
+              "Document not found ❌"
+          });
+
+      }
+
+      // only owner can delete
+      if (
+        doc.owner.toString() !==
+        req.user.userId
+      ) {
+
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              "Not allowed ❌"
+          });
+
+      }
+
+      await Document.findByIdAndDelete(
+        req.params.id
+      );
+
+      res.json({
+        success: true,
+        message:
+          "Document deleted ✅"
+      });
+
+    } catch (err) {
+
+      console.error(
+        "DELETE ERROR:",
+        err
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          "Delete failed"
+      });
+
+    }
+  }
+);
+
+// ================= INVITE =================
+app.post(
+  "/documents/:id/invite",
+  authMiddleware,
+  async (req, res) => {
+
+    try {
+
+      const {
+        email,
+        role
+      } = req.body;
+
+      if (
+        !email ||
+        !email.includes("@")
+      ) {
+
+        return res
+          .status(400)
+          .json({
+            message:
+              "Valid email required"
+          });
+
+      }
+
+      const doc =
+        await Document.findById(
+          req.params.id
+        );
+
+      if (!doc) {
+
+        return res
+          .status(404)
+          .json({
+            message:
+              "Document not found"
+          });
+
+      }
+
+      const inviteLink =
+        `${process.env.FRONTEND_URL}/editor/${req.params.id}`;
+
+      const info =
+        await transporter.sendMail({
+          from:
+            `"Collaborative Editor" <${process.env.EMAIL_USER}>`,
+
+          to: email,
+
+          subject:
+            "📄 Document Collaboration Invite",
+
+          html: `
+          <div style="font-family: Arial; padding:20px;">
+            <h2>📄 Collaborative Editor Invite</h2>
+
+            <p>
+              You have been invited to collaborate on a document.
+            </p>
+
+            <p>
+              <strong>Role:</strong> ${role}
+            </p>
+
+            <a
+              href="${inviteLink}"
+              style="
+                background:#007bff;
+                color:white;
+                padding:12px 20px;
+                text-decoration:none;
+                border-radius:6px;
+                display:inline-block;
+                margin-top:10px;
+              "
+            >
+              Open Document
+            </a>
+
+            <p style="margin-top:20px;">
+              Or copy this link:
+            </p>
+
+            <p>${inviteLink}</p>
+          </div>
+          `
+        });
+
+      console.log(
+        "✅ EMAIL SENT:",
+        info.response
+      );
+
+      res.json({
+        success: true,
+        message:
+          "Invite sent successfully ✅"
+      });
+
+    } catch (err) {
+
+      console.error(
+        "❌ EMAIL ERROR:",
+        err.message
+      );
+
+      res.status(500).json({
+        success: false,
+        message:
+          err.message
+      });
+
+    }
+  }
+);
 
 // ================= SOCKET =================
-const socketUsers = {};
+io.on(
+  "connection",
+  (socket) => {
 
-io.on("connection", (socket) => {
-  console.log("🟢 Socket connected:", socket.id);
+    console.log(
+      "🟢 Socket connected:",
+      socket.id
+    );
 
-  socket.on("join-document", async ({ documentId, userId }) => {
-    socket.join(documentId);
-    socketUsers[socket.id] = { documentId, userId };
+    // ================= JOIN =================
+    socket.on(
+      "join-document",
+      ({
+        documentId,
+        userId
+      }) => {
 
-    try {
-      await redisClient.sAdd(`doc:${documentId}`, userId);
-      const users = await redisClient.sMembers(`doc:${documentId}`);
-      io.to(documentId).emit("active-users", users);
-    } catch {}
-  });
+        socket.join(documentId);
 
-  socket.on("send-changes", async ({ documentId, delta }) => {
-    try {
-      await pubClient.publish(`doc:${documentId}`, JSON.stringify(delta));
-    } catch {
-      socket.to(documentId).emit("receive-changes", delta);
-    }
-  });
+        console.log(
+          `👤 ${userId} joined ${documentId}`
+        );
 
-  socket.on("disconnect", async () => {
-    const user = socketUsers[socket.id];
-    if (!user) return;
+        const room =
+          io.sockets.adapter.rooms.get(
+            documentId
+          );
 
-    const { documentId, userId } = user;
+        const activeUsers =
+          room
+            ? Array.from(room)
+            : [];
 
-    try {
-      await redisClient.sRem(`doc:${documentId}`, userId);
-      const users = await redisClient.sMembers(`doc:${documentId}`);
-      io.to(documentId).emit("active-users", users);
-    } catch {}
+        io.to(documentId).emit(
+          "active-users",
+          activeUsers
+        );
+      }
+    );
 
-    delete socketUsers[socket.id];
-  });
-});
+    // ================= SEND CHANGES =================
+    socket.on(
+      "send-changes",
+      async ({
+        documentId,
+        delta
+      }) => {
+
+        try {
+
+          socket
+            .to(documentId)
+            .emit(
+              "receive-changes",
+              delta
+            );
+
+          await pubClient.publish(
+            `doc:${documentId}`,
+            JSON.stringify(delta)
+          );
+
+        } catch (err) {
+
+          console.error(
+            "Redis Publish Error:",
+            err.message
+          );
+
+        }
+      }
+    );
+
+    // ================= CURSOR =================
+    socket.on(
+      "cursor-change",
+      ({
+        documentId,
+        userId,
+        range
+      }) => {
+
+        socket
+          .to(documentId)
+          .emit(
+            "receive-cursor",
+            {
+              userId,
+              range
+            }
+          );
+      }
+    );
+
+    // ================= TYPING =================
+    socket.on(
+      "typing",
+      ({
+        documentId,
+        userId
+      }) => {
+
+        socket
+          .to(documentId)
+          .emit(
+            "typing",
+            userId
+          );
+      }
+    );
+
+    // ================= DISCONNECT =================
+    socket.on(
+      "disconnect",
+      () => {
+
+        console.log(
+          "🔴 Socket disconnected:",
+          socket.id
+        );
+
+      }
+    );
+  }
+);
 
 // ================= START =================
-const PORT = process.env.PORT || 5000;
+const PORT =
+  process.env.PORT || 5000;
 
 server.listen(PORT, () => {
-  console.log("Server running 🚀 on port", PORT);
+
+  console.log(
+    `🚀 Server running on port ${PORT}`
+  );
+
 });
