@@ -24,39 +24,44 @@ const JWT_SECRET =
   process.env.JWT_SECRET || "mysecretkey";
 
 // ================= EMAIL CONFIG =================
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
+let transporter;
 
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
+(async () => {
 
-  tls: {
-    rejectUnauthorized: false
-  }
-});
+  try {
 
-// ✅ Verify SMTP
-transporter.verify((error) => {
+    const testAccount =
+      await nodemailer.createTestAccount();
 
-  if (error) {
+    transporter =
+      nodemailer.createTransport({
 
-    console.error(
-      "❌ SMTP ERROR:",
-      error.message
-    );
+        host: "smtp.ethereal.email",
 
-  } else {
+        port: 587,
+
+        secure: false,
+
+        auth: {
+          user: testAccount.user,
+          pass: testAccount.pass
+        }
+      });
 
     console.log(
-      "✅ SMTP SERVER READY"
+      "✅ Ethereal Email Ready"
+    );
+
+  } catch (err) {
+
+    console.error(
+      "❌ Email setup failed:",
+      err.message
     );
 
   }
-});
+
+})();
 
 // ================= CORS =================
 const allowedOrigins = [
@@ -202,6 +207,7 @@ const subClient = redisClient.duplicate();
     );
 
   }
+
 })();
 
 // ================= AUTH =================
@@ -324,6 +330,7 @@ app.post(
       });
 
     }
+
   }
 );
 
@@ -387,6 +394,7 @@ app.post(
       });
 
     }
+
   }
 );
 
@@ -412,6 +420,7 @@ app.post(
     await doc.save();
 
     res.json(doc);
+
   }
 );
 
@@ -436,6 +445,7 @@ app.get(
       });
 
     res.json(docs);
+
   }
 );
 
@@ -462,6 +472,7 @@ app.get(
     }
 
     res.json(doc);
+
   }
 );
 
@@ -514,6 +525,7 @@ app.put(
       });
 
     }
+
   }
 );
 
@@ -542,7 +554,6 @@ app.delete(
 
       }
 
-      // only owner can delete
       if (
         doc.owner.toString() !==
         req.user.userId
@@ -582,6 +593,7 @@ app.delete(
       });
 
     }
+
   }
 );
 
@@ -633,8 +645,9 @@ app.post(
 
       const info =
         await transporter.sendMail({
+
           from:
-            `"Collaborative Editor" <${process.env.EMAIL_USER}>`,
+            '"Collaborative Editor" <demo@ethereal.email>',
 
           to: email,
 
@@ -643,7 +656,10 @@ app.post(
 
           html: `
           <div style="font-family: Arial; padding:20px;">
-            <h2>📄 Collaborative Editor Invite</h2>
+
+            <h2>
+              📄 Collaborative Editor Invite
+            </h2>
 
             <p>
               You have been invited to collaborate on a document.
@@ -673,13 +689,16 @@ app.post(
             </p>
 
             <p>${inviteLink}</p>
+
           </div>
           `
         });
 
+      console.log("✅ EMAIL SENT");
+
       console.log(
-        "✅ EMAIL SENT:",
-        info.response
+        "📨 Preview URL:",
+        nodemailer.getTestMessageUrl(info)
       );
 
       res.json({
@@ -702,6 +721,7 @@ app.post(
       });
 
     }
+
   }
 );
 
@@ -715,7 +735,6 @@ io.on(
       socket.id
     );
 
-    // ================= JOIN =================
     socket.on(
       "join-document",
       ({
@@ -743,10 +762,10 @@ io.on(
           "active-users",
           activeUsers
         );
+
       }
     );
 
-    // ================= SEND CHANGES =================
     socket.on(
       "send-changes",
       async ({
@@ -776,10 +795,10 @@ io.on(
           );
 
         }
+
       }
     );
 
-    // ================= CURSOR =================
     socket.on(
       "cursor-change",
       ({
@@ -797,10 +816,10 @@ io.on(
               range
             }
           );
+
       }
     );
 
-    // ================= TYPING =================
     socket.on(
       "typing",
       ({
@@ -814,10 +833,10 @@ io.on(
             "typing",
             userId
           );
+
       }
     );
 
-    // ================= DISCONNECT =================
     socket.on(
       "disconnect",
       () => {
@@ -829,6 +848,7 @@ io.on(
 
       }
     );
+
   }
 );
 
